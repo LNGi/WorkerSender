@@ -12,10 +12,9 @@
  * @license http://www.opensource.org/licenses/mit-license.php MIT License
  */
 
-use Workerman\Connection\TcpConnection;
+use Workerman\Connection\AsyncTcpConnection;
 use \Workerman\Worker;
 use \Workerman\Lib\Timer;
-use \Workerman\Autoloader;
 
 /**
  * 
@@ -40,10 +39,16 @@ class Proxy extends Worker
     public $pingData = '';
     
     /**
+     * worker进程的通讯地址，例如127.0.0.1:2015
+     * @var string
+     */
+    public $workerAddress = '127.0.0.1:2015';
+    
+    /**
      * 标签标记的连接
      * @var array
      */
-    protected $tagConnections = array();
+    protected $_tagConnections = array();
     
     /**
      * 保存客户端的所有connection对象
@@ -58,6 +63,12 @@ class Proxy extends Worker
     protected $_workerConnection = null;
     
     /**
+     * 当worker启动时
+     * @var callback
+     */
+    protected $_onWorkerStart = null;
+    
+    /**
      * 当客户端发来消息时
      * @var callback
      */
@@ -69,7 +80,11 @@ class Proxy extends Worker
      */
     protected $_onClose = null;
     
-    //protedted $
+    /**
+     * 给每次推送的消息做编号，目的是去重
+     * @var int
+     */
+    protected $_messageId = 0;
     
     /**
      * 进程启动时间
@@ -78,25 +93,17 @@ class Proxy extends Worker
     protected $_startTime = 0;
     
     /**
-     * 构造函数
-     * @param string $socket_name
-     * @param array $context_option
-     */
-    public function __construct($socket_name, $context_option = array())
-    {
-        parent::__construct($socket_name, $context_option);
-        
-        $backrace = debug_backtrace();
-        $this->_appInitPath = dirname($backrace[0]['file']);
-    }
-    
-    /**
      * 运行
      * @see Workerman.Worker::run()
      */
     public function run()
     {
-        // onMessage禁止用户设置回调
+        // 保存用户的回调，当对应的事件发生时触发
+        $this->_onWorkerStart = $this->onWorkerStart;
+        $this->onWorkerStart = array($this, 'onWorkerStart');
+        
+        // 保存用户的回调，当对应的事件发生时触发
+        $this->_onMessage = $this->onMessage;
         $this->onMessage = array($this, 'onClientMessage');
         
         // 保存用户的回调，当对应的事件发生时触发
@@ -107,6 +114,32 @@ class Proxy extends Worker
         $this->_startTime = time();
         // 运行父方法
         parent::run();
+    }
+    
+    /**
+     * 进程启动时触发
+     * @return void
+     */
+    public function onWorkerStart()
+    {
+        $this->connectWorker();
+        if($this->_onWorkerStart)
+        {
+            call_user_func($this->_onWorkerStart, $this);
+        }
+    }
+    
+    public function connectWorker()
+    {
+        if($this->_workerConnection)
+        {
+            $this->_workerConnection->close();
+        }
+        $this->_workerConnection = new AsyncTcpConnection("Text://{$this->workerAddress}");
+        $this->_workerConnection->onMessage = array($this, 'onWorkerMessage');
+        $this->_workerConnection->onClose = array($this, 'onWorkerClose');
+        $this->_workerConnection->onError= array($this, 'onWorkerError');
+        $this->_workerConnection->connect();
     }
     
     /**
@@ -137,7 +170,12 @@ class Proxy extends Worker
                 unset($tags[$key]);
                 continue;
             }
-            $this->tagConnections[$tag][$connection->id] = $connection;
+            $this->_tagConnections[$tag][$connection->id] = $connection;
+        }
+        
+        if($this->_onMessage)
+        {
+            call_user_func($this->_onMessage, $connection);
         }
     }
     
@@ -151,7 +189,7 @@ class Proxy extends Worker
         {
             foreach($connection->tags as $tag)
             {
-                unset($this->tagConnections[$tag][$connection->id]);
+                unset($this->_tagConnections[$tag][$connection->id]);
             }
         }
         if($this->_onClose)
@@ -169,33 +207,91 @@ class Proxy extends Worker
      */
     public function onWorkerMessage($connection, $data)
     {
-        $cmd = $data['cmd'];
-        switch($cmd)
+        $this->_messageId++;
+        $data = json_decode($data, true);
+        $type = $data['type'];
+        $content = $data['content'];
+        switch($type)
         {
             // 向某客户端发送数据，Gateway::sendToClient($client_id, $message);
             case 'send_to_all':
                 foreach($this->connections as $client_connection)
                 {
-                    $client_connection->send($data['content']);
+                    $client_connection->send($content);
                 }
                 break;
-            case 'send_to_tag':
+            case 'send_by_tag':
                 foreach($data['tags'] as $tag)
                 {
-                    
+                    if(!isset($this->_tagConnections[$tag]))
+                    {
+                       continue;
+                    }
+                    foreach($this->_tagConnections[$tag] as $client_connection)
+                    {
+                        if(!isset($client_connection->messageId))
+                        {
+                            $client_connection->messageId = 0;
+                        }
+                        // 发过了就不再发了
+                        if($this->_messageId == $client_connection->messageId)
+                        {
+                            continue;
+                        }
+                        // 发送消息
+                        $client_connection->send($content);
+                        // 标记这个消息已经发过
+                        $client_connection->messageId = $this->_messageId;
+                    }
                 }
-                
+                break;
         }
     }
     
-    public function sendToAll()
+    /**
+     * 当与Worker的连接出现错误时，定时重连
+     * @param TcpConnection $connection
+     * @param int $code
+     * @param string $msg
+     */
+    public function onWorkerError($connection, $code, $msg)
     {
-        
+        Timer::add(1, array($this, 'connectWorker'));
     }
     
-    public function sendToTags()
+    /**
+     * 向所有在线客户端发送数据
+     * @param string $content
+     */
+    public function sendToAll($content)
     {
-        
+        if($this->_workerConnection)
+        {
+            $data = array(
+                'type' => 'send_to_all',
+                'content' => $content,
+            );
+            return $this->_workerConnection->send(json_encode($data));
+        }
+        echo "inner connection not ready\n";
+    }
+    
+    /**
+     * 根据标签发送
+     * @param string/array $tag 可以是单个tag字符串，也可以是tag数组
+     * @param string $content
+     */
+    public function sendByTag($tag, $content)
+    {
+        if($this->_workerConnection)
+        {
+            $data = array(
+                    'type' => 'send_by_tag',
+                    'content' => $content,
+            );
+            return $this->_workerConnection->send(json_encode($data));
+        }
+        echo "inner connection not ready\n";
     }
     
     /**
@@ -204,8 +300,7 @@ class Proxy extends Worker
      */
     public function onWorkerClose($connection)
     {
-        //$this->log("{$connection->remoteAddress} CLOSE INNER_CONNECTION\n");
-        unset($this->_workerConnections[$connection->remoteAddress]);
+        Timer::add(1, array($this, 'connectWorker'));
     }
     
     

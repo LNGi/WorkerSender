@@ -19,55 +19,45 @@ use \Workerman\Lib\Timer;
 require_once __DIR__ . '/../workerman-for-win/Autoloader.php';
 
 // proxy 进程
-$proxy = new Worker("Text://0.0.0.0:2015");
+$worker = new Worker("Text://0.0.0.0:2015");
 // 设置名称，方便status时查看
-$proxy->name = 'worker';
+$worker->name = 'senderWorker';
 // 设置进程数1
-$proxy->count = 1;
-
-$proxy->onWorkerStart = function($proxy)
+$worker->count = 1;
+// 进程启动后，在当前进程初始化一个http协议的端口，用来推送数据
+$worker->onWorkerStart = function()
 {
-    
+    $http_worker = new Worker('Http://0.0.0.0:2016');
+    $http_worker->onMessage = function($connection, $data)
+    {
+        if(!isset($_GET['type']) || !isset($_GET['content']))
+        {
+            return $connection->close('bad request');
+        }
+        broadcast(json_encode($_GET));
+        return $connection->close('ok');
+    };
+    $http_worker->listen();
 };
 
-$proxy->onMessage = function($connection ,$data)
+// 将消息转发给所有的proxy进程
+$worker->onMessage = function($connection ,$data)
 {
-    
+    broadcast($data);
 };
+
+// 广播给所有的proxy进程
+function broadcast($message)
+{
+    global $worker;
+    foreach($worker->connections as $connection)
+    {
+        $connection->send($message);
+    }
+}
 
 // 如果不是在根目录启动，则运行runAll方法
 if(!defined('GLOBAL_START'))
 {
     Worker::runAll();
-}
-
-function creat_worker_connection()
-{
-    global $proxy;
-    
-    $worker_connection = new AsyncTcpConnection('Text://127.0.0.1:2016');
-    
-    $worker_connection->onError = function($connection, $code, $msg)
-    {
-        echo $msg;
-    };
-    
-    $worker_connection->onClose = function($connection)
-    {
-        // 断开后定时重连
-        Timer::add(1, 'creat_worker_connection', array(), false);
-    };
-    
-    $worker_connection->onMessage = function($connection, $data)
-    {
-        if(!isset($data['type']) || !isset($data['tag']) || !isset($data['content']))
-        {
-            return $worker_connection->close('bad request');
-        }
-        $type = $data['type'];
-        $tag = $data['tag'];
-        $content = $data['content'];
-        
-    };
-    $worker_connection->connect();
 }

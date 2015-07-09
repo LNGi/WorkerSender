@@ -12,22 +12,18 @@
  * @license http://www.opensource.org/licenses/mit-license.php MIT License
  */
 use \Workerman\Worker;
-use \Workerman\WebServer;
-use \GatewayWorker\Gateway;
-use \GatewayWorker\BusinessWorker;
 use \Workerman\Autoloader;
 
 // 自动加载类
 require_once __DIR__ . '/../workerman-for-win/Autoloader.php';
 Autoloader::setRootPath(__DIR__);
 
-// WebServer
-$web = new WebServer("http://0.0.0.0:55151");
-// WebServer数量
-$web->count = 2;
-// 设置站点根目录
-$web->addRoot('www.your_domain.com', __DIR__.'/Web');
-
+// proxy 进程
+$proxy = new Proxy("Http://0.0.0.0:7373");
+// 设置名称，方便status时查看
+$proxy->name = 'SenderHttpProxy';
+// 设置进程数，proxy进程数建议与cpu核数相同
+$proxy->count = 4;
 
 // 如果不是在根目录启动，则运行runAll方法
 if(!defined('GLOBAL_START'))

@@ -12,14 +12,16 @@
  * @license http://www.opensource.org/licenses/mit-license.php MIT License
  */
 use \Workerman\Worker;
+use \Workerman\Autoloader;
 
 // 自动加载类
 require_once __DIR__ . '/../workerman-for-win/Autoloader.php';
+Autoloader::setRootPath(__DIR__);
 
 // proxy 进程
-$proxy = new Worker("Websocket://0.0.0.0:7272");
+$proxy = new Proxy("Websocket://0.0.0.0:7272");
 // 设置名称，方便status时查看
-$proxy->name = 'proxy';
+$proxy->name = 'SenderProxy';
 // 设置进程数，proxy进程数建议与cpu核数相同
 $proxy->count = 4;
 
