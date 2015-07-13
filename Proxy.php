@@ -39,16 +39,22 @@ class Proxy extends Worker
     public $pingData = '';
     
     /**
+     * 心跳间隔
+     * @var int
+     */
+    public $pingInterval = 0;
+    
+    /**
      * worker进程的通讯地址，例如127.0.0.1:2015
      * @var string
      */
     public $workerAddress = '127.0.0.1:2015';
     
     /**
-     * 标签标记的连接
+     * 订阅的主题对应的连接
      * @var array
      */
-    protected $_tagConnections = array();
+    protected $_subjectConnections = array();
     
     /**
      * 保存客户端的所有connection对象
@@ -123,6 +129,10 @@ class Proxy extends Worker
     public function onWorkerStart()
     {
         $this->connectWorker();
+        if($this->pingInterval > 0 && $this->pingData)
+        {
+            Timer::add($this->pingInterval, array($this, 'ping'));
+        }
         if($this->_onWorkerStart)
         {
             call_user_func($this->_onWorkerStart, $this);
@@ -143,35 +153,46 @@ class Proxy extends Worker
     }
     
     /**
-     * 当客户端发来数据时，根据tag保存连接对象
+     * 当客户端发来数据时，根据subject保存连接对象
      * @param TcpConnection $connection
      * @param mixed $data
      */
     public function onClientMessage($connection, $data)
     {
         // 如果是http协议，则数据通过GET传递
-        if(!empty($_GET))
+        if(isset($data['get']))
         {
-            $data = $_GET;
+            $data = $data['get'];
         }
-        // 没有设置标签，则直接返回
-        if(!isset($data['tags']))
+        else 
+        {
+            $data = json_decode($data, true);
+        }
+        
+        if(!isset($data['type']) || $data['type'] !== 'subscribe')
+        {
+            return $connection->close('type error');
+        }
+        
+        // 没有设置订阅的主题，则直接返回
+        if(!isset($data['subjects']))
         {
             return;
         }
-        // 数据中多个tag由逗号分隔
-        $tags = explode(',', $data['tags']);
-        // 根据tag保存连接
-        foreach($tags as $key=>$tag)
+        // 数据中多个subject由逗号分隔
+        $subjects = explode(',', $data['subjects']);
+        // 根据subject保存连接
+        foreach($subjects as $key=>$subject)
         {
-            $tag = trim($tag);
-            if($tag === '')
+            $subject = trim($subject);
+            if($subject === '')
             {
-                unset($tags[$key]);
+                unset($subjects[$key]);
                 continue;
             }
-            $this->_tagConnections[$tag][$connection->id] = $connection;
+            $this->_subjectConnections[$subject][$connection->id] = $connection;
         }
+        $connection->subjects = $subjects;
         
         if($this->_onMessage)
         {
@@ -181,15 +202,15 @@ class Proxy extends Worker
     
     /**
      * 当客户端关闭时
-     * @param unknown_type $connection
+     * @param TcpConnection $connection
      */
     public function onClientClose($connection)
     {
-        if(!empty($connection->tags))
+        if(!empty($connection->subjects))
         {
-            foreach($connection->tags as $tag)
+            foreach($connection->subjects as $subject)
             {
-                unset($this->_tagConnections[$tag][$connection->id]);
+                unset($this->_subjectConnections[$subject][$connection->id]);
             }
         }
         if($this->_onClose)
@@ -211,23 +232,36 @@ class Proxy extends Worker
         $data = json_decode($data, true);
         $type = $data['type'];
         $content = $data['content'];
+        if(isset($data['subjects']))
+        {
+            $subjects = explode(',', $data['subjects']);
+        }
+        else
+        {
+            $subjects = '';
+        }
+        
         switch($type)
         {
-            // 向某客户端发送数据，Gateway::sendToClient($client_id, $message);
-            case 'send_to_all':
-                foreach($this->connections as $client_connection)
+            // 向主题订阅者发布数据
+            case 'publish':
+                // 没用给明主题则发送给所有订阅者
+                if(empty($subjects))
                 {
-                    $client_connection->send($content);
+                    foreach($this->connections as $client_connection)
+                    {
+                        $client_connection->send($content);
+                    }
+                    return;
                 }
-                break;
-            case 'send_by_tag':
-                foreach($data['tags'] as $tag)
+                // 主题不为空，给这些主题的订阅者发送
+                foreach($subjects as $subject)
                 {
-                    if(!isset($this->_tagConnections[$tag]))
+                    if(!isset($this->_subjectConnections[$subject]))
                     {
                        continue;
                     }
-                    foreach($this->_tagConnections[$tag] as $client_connection)
+                    foreach($this->_subjectConnections[$subject] as $client_connection)
                     {
                         if(!isset($client_connection->messageId))
                         {
@@ -260,33 +294,17 @@ class Proxy extends Worker
     }
     
     /**
-     * 向所有在线客户端发送数据
+     * 根据主题向订阅者发送
+     * @param string $subject 多个主题用逗号分隔
      * @param string $content
      */
-    public function sendToAll($content)
+    public function publish($subjects, $content)
     {
         if($this->_workerConnection)
         {
             $data = array(
-                'type' => 'send_to_all',
-                'content' => $content,
-            );
-            return $this->_workerConnection->send(json_encode($data));
-        }
-        echo "inner connection not ready\n";
-    }
-    
-    /**
-     * 根据标签发送
-     * @param string/array $tag 可以是单个tag字符串，也可以是tag数组
-     * @param string $content
-     */
-    public function sendByTag($tag, $content)
-    {
-        if($this->_workerConnection)
-        {
-            $data = array(
-                    'type' => 'send_by_tag',
+                    'type' => 'publish',
+                    'subjects' => $subjects,
                     'content' => $content,
             );
             return $this->_workerConnection->send(json_encode($data));
@@ -300,7 +318,8 @@ class Proxy extends Worker
      */
     public function onWorkerClose($connection)
     {
-        Timer::add(1, array($this, 'connectWorker'));
+        // 0.1秒后重连
+        Timer::add(0.1, array($this, 'connectWorker'));
     }
     
     
