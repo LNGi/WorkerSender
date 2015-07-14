@@ -16,10 +16,10 @@ use \Workerman\Connection\AsyncTcpConnection;
 use \Workerman\Lib\Timer;
 
 // 自动加载类
-require_once __DIR__ . '/../workerman-for-win/Autoloader.php';
+require_once __DIR__ . '/loader.php';
 
 // proxy 进程
-$worker = new Worker("Text://0.0.0.0:2015");
+$worker = new Worker("Text://0.0.0.0:3000");
 // 设置名称，方便status时查看
 $worker->name = 'senderWorker';
 // 设置进程数1
@@ -27,7 +27,7 @@ $worker->count = 1;
 // 进程启动后，在当前进程初始化一个http协议的端口，用来推送数据
 $worker->onWorkerStart = function()
 {
-    $http_worker = new Worker('Http://0.0.0.0:2016');
+    $http_worker = new Worker('Http://0.0.0.0:3001');
     $http_worker->onMessage = function($connection, $data)
     {
         if(!isset($_GET['type']) || !isset($_GET['content']))

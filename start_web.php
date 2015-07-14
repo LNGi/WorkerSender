@@ -13,16 +13,14 @@
  */
 use \Workerman\Worker;
 use \Workerman\WebServer;
-use \GatewayWorker\Gateway;
-use \GatewayWorker\BusinessWorker;
 use \Workerman\Autoloader;
 
 // 自动加载类
-require_once __DIR__ . '/../workerman-for-win/Autoloader.php';
+require_once __DIR__ . '/loader.php';
 Autoloader::setRootPath(__DIR__);
 
 // WebServer
-$web = new WebServer("http://0.0.0.0:55151");
+$web = new WebServer("http://0.0.0.0:3003");
 // WebServer数量
 $web->count = 2;
 // 设置站点根目录
