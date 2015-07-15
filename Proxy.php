@@ -318,12 +318,18 @@ class Proxy extends Worker
         echo "inner connection not ready\n";
     }
     
+    /**
+     * 当连接失败时
+     * @param TcpConnection $connection
+     * @param int $code
+     * @param string $msg
+     */
     public function onWorkerError($connection, $code, $msg)
     {
         if($code === WORKERMAN_CONNECT_FAIL)
         {
             unset($this->_workerConnections[$connetion->address]);
-            echo "can not connect to {$connetion->address}\n";
+            echo "can not connect to {$connetion->address} $msg\n";
         }
     }
     
