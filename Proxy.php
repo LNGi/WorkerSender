@@ -323,6 +323,7 @@ class Proxy extends Worker
         if($code === WORKERMAN_CONNECT_FAIL)
         {
             unset($this->_workerConnections[$connetion->address]);
+            echo "can not connect to {$connetion->address}\n";
         }
     }
     
