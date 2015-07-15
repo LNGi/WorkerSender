@@ -45,10 +45,10 @@ class Proxy extends Worker
     public $pingInterval = 0;
     
     /**
-     * worker进程的通讯地址，例如127.0.0.1:2015
+     * worker进程的通讯地址，例如Text://127.0.0.1:3000
      * @var string
      */
-    public $workerAddress = '127.0.0.1:2015';
+    public $workerAddress = 'Text://127.0.0.1:3000';
     
     /**
      * 订阅的主题对应的连接
@@ -66,7 +66,7 @@ class Proxy extends Worker
      * 保存到worker的内部连接的connection对象
      * @var array
      */
-    protected $_workerConnection = null;
+    protected $_workerConnections = array();
     
     /**
      * 当worker启动时
@@ -128,28 +128,40 @@ class Proxy extends Worker
      */
     public function onWorkerStart()
     {
-        $this->connectWorker();
+        $this->checkWorkerConnections();
+        // 定时心跳
         if($this->pingInterval > 0 && $this->pingData)
         {
             Timer::add($this->pingInterval, array($this, 'ping'));
         }
+        // 定时检查与worker的连接
+        Timer::add(1, array($this, 'checkWorkerConnections'));
         if($this->_onWorkerStart)
         {
             call_user_func($this->_onWorkerStart, $this);
         }
     }
     
-    public function connectWorker()
+    /**
+     * 检查与worker的连接
+     * @return void
+     */
+    public function checkWorkerConnections()
     {
-        if($this->_workerConnection)
+        $address = (array)$this->workerAddress;
+        foreach($address as $address)
         {
-            $this->_workerConnection->close();
+            if(!isset($this->_workerConnections[$address]))
+            {
+                $connection_to_worker = new AsyncTcpConnection($address);
+                $connection_to_worker->onMessage = array($this, 'onWorkerMessage');
+                $connection_to_worker->onClose = array($this, 'onWorkerClose');
+                $connection_to_worker->onError = array($this, 'onWorkerError');
+                $connection_to_worker->address = $address;
+                $connection_to_worker->connect();
+                $this->_workerConnections[$address] = $connection_to_worker;
+            }
         }
-        $this->_workerConnection = new AsyncTcpConnection("Text://{$this->workerAddress}");
-        $this->_workerConnection->onMessage = array($this, 'onWorkerMessage');
-        $this->_workerConnection->onClose = array($this, 'onWorkerClose');
-        $this->_workerConnection->onError= array($this, 'onWorkerError');
-        $this->_workerConnection->connect();
     }
     
     /**
@@ -283,33 +295,35 @@ class Proxy extends Worker
     }
     
     /**
-     * 当与Worker的连接出现错误时，定时重连
-     * @param TcpConnection $connection
-     * @param int $code
-     * @param string $msg
-     */
-    public function onWorkerError($connection, $code, $msg)
-    {
-        Timer::add(1, array($this, 'connectWorker'));
-    }
-    
-    /**
      * 根据主题向订阅者发送
      * @param string $subject 多个主题用逗号分隔
      * @param string $content
      */
     public function publish($subjects, $content)
     {
-        if($this->_workerConnection)
+        if($this->_workerConnections)
         {
             $data = array(
                     'type' => 'publish',
                     'subjects' => $subjects,
                     'content' => $content,
             );
-            return $this->_workerConnection->send(json_encode($data));
+            $buffer = json_encode($data);
+            foreach($this->_workerConnections as $connection)
+            {
+                $connection->send($buffer);
+            }
+            return;
         }
         echo "inner connection not ready\n";
+    }
+    
+    public function onWorkerError($connection, $code, $msg)
+    {
+        if($code === WORKERMAN_CONNECT_FAIL)
+        {
+            unset($this->_workerConnections[$connetion->address]);
+        }
     }
     
     /**
@@ -318,8 +332,7 @@ class Proxy extends Worker
      */
     public function onWorkerClose($connection)
     {
-        // 0.1秒后重连
-        Timer::add(0.1, array($this, 'connectWorker'));
+        unset($this->_workerConnections[$connetion->address]);
     }
     
     
